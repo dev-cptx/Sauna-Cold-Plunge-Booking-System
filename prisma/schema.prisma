@@ -1,0 +1,223 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────
+
+enum Role {
+  CUSTOMER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum BookingStatus {
+  PENDING      // created, awaiting payment
+  CONFIRMED    // payment received
+  COMPLETED    // session took place
+  CANCELLED    // cancelled by customer or admin
+  NO_SHOW      // customer did not appear
+  EXPIRED      // payment window elapsed
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  EXPIRED
+}
+
+enum DayOfWeek {
+  MONDAY
+  TUESDAY
+  WEDNESDAY
+  THURSDAY
+  FRIDAY
+  SATURDAY
+  SUNDAY
+}
+
+// ─────────────────────────────────────────────
+// Users
+// ─────────────────────────────────────────────
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  phone        String?
+  passwordHash String?
+  role         Role     @default(CUSTOMER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  bookings Booking[]
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// Operational Schedule
+// ─────────────────────────────────────────────
+
+model OperationalHours {
+  id                String    @id @default(cuid())
+  dayOfWeek         DayOfWeek @unique
+  openTime          String    // "09:00"
+  closeTime         String    // "22:00"
+  slotDuration      Int       @default(60)  // minutes per session
+  breakBetweenSlots Int       @default(15)  // buffer between sessions
+  isActive          Boolean   @default(true)
+
+  @@map("operational_hours")
+}
+
+model BlockedDate {
+  id        String    @id @default(cuid())
+  date      DateTime  @db.Date
+  reason    String?
+  isFullDay Boolean   @default(true)
+  startTime String?   // if isFullDay=false
+  endTime   String?
+  createdAt DateTime  @default(now())
+
+  @@index([date])
+  @@map("blocked_dates")
+}
+
+// ─────────────────────────────────────────────
+// Time Slots
+// ─────────────────────────────────────────────
+
+model TimeSlot {
+  id          String   @id @default(cuid())
+  date        DateTime @db.Date
+  startTime   String   // "09:00"
+  endTime     String   // "10:00"
+  capacity    Int      @default(5)  // private room — max 5 pax per booking
+  isBlocked   Boolean  @default(false)
+  blockedNote String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  bookings Booking[]
+
+  @@unique([date, startTime])
+  @@index([date])
+  @@map("time_slots")
+}
+
+// ─────────────────────────────────────────────
+// Pricing Engine
+// ─────────────────────────────────────────────
+
+// Single-row config.
+// rates JSON shape — 5 bands × 5 pax:
+// {
+//   weekdayOffPeak:        [r1..r5],  // slots outside both peak windows
+//   weekdayMorningPeak:    [r1..r5],  // slots within morning peak window
+//   weekdayAfternoonPeak:  [r1..r5],  // slots within afternoon peak window
+//   weekendOffPeak:        [r1..r5],  // slots outside weekend peak window
+//   weekendPeak:           [r1..r5],  // slots within weekend peak window
+// }
+// Each value is price PER PAX in IDR. Total = rate × pax.
+// Weekend = Saturday + Sunday.
+model PricingConfig {
+  id String @id @default(cuid())
+
+  // Weekday: two configurable peak windows (Mon–Fri)
+  weekdayMorningPeakStart   String @default("07:00")
+  weekdayMorningPeakEnd     String @default("10:00")
+  weekdayAfternoonPeakStart String @default("17:00")
+  weekdayAfternoonPeakEnd   String @default("22:00")
+
+  // Weekend: one configurable peak window (Sat–Sun)
+  weekendPeakStart String @default("10:00")
+  weekendPeakEnd   String @default("22:00")
+
+  rates Json
+
+  updatedAt DateTime @updatedAt
+
+  @@map("pricing_config")
+}
+
+// ─────────────────────────────────────────────
+// Bookings
+// ─────────────────────────────────────────────
+
+model Booking {
+  id          String @id @default(cuid())
+  bookingCode String @unique @default(cuid())
+
+  // Customer info (captured at booking time; survives user deletion)
+  userId         String?
+  customerName   String
+  customerEmail  String
+  customerPhone  String
+
+  timeSlotId String
+  pax        Int
+  basePrice  Decimal @db.Decimal(12, 2)
+  totalPrice Decimal @db.Decimal(12, 2)
+
+  status             BookingStatus @default(PENDING)
+  notes              String?
+  qrCodeData         String?       // signed QR payload, set after payment
+  confirmedAt        DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user     User?     @relation(fields: [userId], references: [id])
+  timeSlot TimeSlot  @relation(fields: [timeSlotId], references: [id])
+  payment  Payment?
+
+  @@index([customerEmail])
+  @@index([timeSlotId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("bookings")
+}
+
+// ─────────────────────────────────────────────
+// Payments
+// ─────────────────────────────────────────────
+
+model Payment {
+  id        String @id @default(cuid())
+  bookingId String @unique
+
+  // Gateway
+  gatewayProvider      String          // "midtrans" | "xendit"
+  gatewayOrderId       String  @unique // our order ID sent to gateway
+  gatewayTransactionId String? @unique // gateway's own transaction ID
+  gatewayPaymentUrl    String?
+  snapToken            String?         // Midtrans Snap token
+
+  amount   Decimal @db.Decimal(12, 2)
+  currency String  @default("IDR")
+
+  status        PaymentStatus @default(PENDING)
+  paymentMethod String?       // "gopay", "qris", "credit_card", etc.
+  paidAt        DateTime?
+  expiredAt     DateTime?
+
+  gatewayResponse Json? // raw webhook payload for audit
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  booking Booking @relation(fields: [bookingId], references: [id])
+
+  @@map("payments")
+}

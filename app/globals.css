@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* react-day-picker overrides */
+.rdp-day_selected:not([disabled]) {
+  background-color: #0f3460 !important;
+  color: white !important;
+}
+.rdp-day:hover:not([disabled]):not(.rdp-day_selected) {
+  background-color: #e0e7f5 !important;
+}
+.rdp-day_today {
+  font-weight: 700;
+  color: #0f3460;
+}
+
+@layer base {
+  body { @apply antialiased; }
+}
