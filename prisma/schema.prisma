@@ -92,6 +92,19 @@ model BlockedDate {
   @@map("blocked_dates")
 }
 
+// Dates that use weekend pricing even if they fall on a weekday.
+// e.g. public holidays, special events, long-weekend bridges.
+model HolidayDate {
+  id        String   @id @default(cuid())
+  date      DateTime @db.Date
+  label     String?  // e.g. "Idul Fitri", "Christmas Day"
+  createdAt DateTime @default(now())
+
+  @@unique([date])
+  @@index([date])
+  @@map("holiday_dates")
+}
+
 // ─────────────────────────────────────────────
 // Time Slots
 // ─────────────────────────────────────────────

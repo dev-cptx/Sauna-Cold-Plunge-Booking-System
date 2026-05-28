@@ -1,5 +1,5 @@
 import { prisma } from './prisma'
-import { getDay } from 'date-fns'
+import { getDay, format } from 'date-fns'
 import { timeToMinutes } from './utils'
 import type { PriceEstimate } from '@/types'
 
@@ -69,13 +69,21 @@ export async function calculatePrice(
   startTime: string,
   pax: number,
 ): Promise<PriceEstimate> {
-  const config = await prisma.pricingConfig.findFirst()
+  const dateStr = format(slotDate, 'yyyy-MM-dd')
+
+  // Batch both lookups in one round-trip
+  const [config, holidayCount] = await Promise.all([
+    prisma.pricingConfig.findFirst(),
+    prisma.holidayDate.count({ where: { date: new Date(dateStr) } }),
+  ])
 
   const cfg   = config ?? DEFAULT_CONFIG
   const rates = (config?.rates as RateMatrix | null) ?? DEFAULT_RATES
 
   const day       = getDay(slotDate)   // 0 = Sun, 6 = Sat
-  const isWeekend = day === 0 || day === 6
+  // Holidays are priced like weekends regardless of their actual day
+  const isWeekend = day === 0 || day === 6 || holidayCount > 0
+  const isHoliday = holidayCount > 0 && day !== 0 && day !== 6
 
   const key: RateKey = isWeekend
     ? weekendKey(startTime, cfg.weekendPeakStart, cfg.weekendPeakEnd)
@@ -89,12 +97,19 @@ export async function calculatePrice(
   const idx         = Math.min(Math.max(pax, 1), 5) - 1
   const pricePerPax = rateList[idx] ?? rateList[0]
 
+  // Build a human-readable label (show "Holiday" instead of "Weekend" for clarity)
+  const dayLabel  = isHoliday ? 'Holiday' : isWeekend ? 'Weekend' : 'Weekday'
+  const timeLabel = key.includes('Morning')   ? 'Morning Peak'
+                  : key.includes('Afternoon') ? 'Afternoon Peak'
+                  : key.includes('Peak')      ? 'Peak'
+                  : 'Off-peak'
+
   return {
     basePrice:  0,
     pricePerPax,
     pax,
     totalPrice: pricePerPax * pax,
     currency:   'IDR',
-    ruleName:   RATE_KEY_LABEL[key],
+    ruleName:   `${dayLabel} · ${timeLabel}`,
   }
 }

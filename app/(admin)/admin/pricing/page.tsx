@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { format, parseISO } from 'date-fns'
 import { formatCurrency } from '@/lib/utils'
 import type { RateKey, RateMatrix } from '@/lib/pricing'
 
@@ -21,6 +22,13 @@ type WindowField =
   | 'weekdayMorningPeakStart'   | 'weekdayMorningPeakEnd'
   | 'weekdayAfternoonPeakStart' | 'weekdayAfternoonPeakEnd'
   | 'weekendPeakStart'          | 'weekendPeakEnd'
+
+interface HolidayDate {
+  id:        string
+  date:      string   // ISO string from API
+  label:     string | null
+  createdAt: string
+}
 
 // ─── Constants ────────────────────────────────────────────
 
@@ -93,9 +101,11 @@ function TimeWindow({
 export default function PricingPage() {
   const qc = useQueryClient()
 
-  const [windows, setWindows] = useState(DEFAULT_WINDOWS)
-  const [rates,   setRates]   = useState<RateMatrix>(DEFAULT_RATES)
-  const [flash,   setFlash]   = useState<'saved' | 'error' | null>(null)
+  const [windows,      setWindows]      = useState(DEFAULT_WINDOWS)
+  const [rates,        setRates]        = useState<RateMatrix>(DEFAULT_RATES)
+  const [flash,        setFlash]        = useState<'saved' | 'error' | null>(null)
+  const [newHoliday,   setNewHoliday]   = useState({ date: '', label: '' })
+  const [holidayError, setHolidayError] = useState<string | null>(null)
 
   const { data: config } = useQuery<PricingConfig | null>({
     queryKey: ['pricing-config'],
@@ -132,6 +142,33 @@ export default function PricingPage() {
       setFlash('error')
       setTimeout(() => setFlash(null), 3000)
     },
+  })
+
+  // ── Holiday queries ──────────────────────────────────────
+  const { data: holidays = [] } = useQuery<HolidayDate[]>({
+    queryKey: ['holidays'],
+    queryFn:  () => fetch('/api/admin/holidays').then((r) => r.json()),
+  })
+
+  const addHoliday = useMutation({
+    mutationFn: () =>
+      fetch('/api/admin/holidays', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ date: newHoliday.date, label: newHoliday.label || undefined }),
+      }).then((r) => r.json()),
+    onSuccess: (data) => {
+      if (data.error) { setHolidayError(data.error); return }
+      qc.invalidateQueries({ queryKey: ['holidays'] })
+      setNewHoliday({ date: '', label: '' })
+      setHolidayError(null)
+    },
+    onError: () => setHolidayError('Failed to add date. Try again.'),
+  })
+
+  const removeHoliday = useMutation({
+    mutationFn: (id: string) => fetch(`/api/admin/holidays/${id}`, { method: 'DELETE' }),
+    onSuccess:  () => qc.invalidateQueries({ queryKey: ['holidays'] }),
   })
 
   function setWindow(field: WindowField, value: string) {
@@ -306,12 +343,99 @@ export default function PricingPage() {
           </p>
         </div>
         <div className="bg-white rounded-xl border border-gray-100 px-4 py-3">
-          <p className="font-semibold text-gray-700 mb-1">Weekend logic</p>
+          <p className="font-semibold text-gray-700 mb-1">Weekend &amp; Holiday logic</p>
           <p>
             If a slot starts between <strong>{windows.weekendPeakStart}–{windows.weekendPeakEnd}</strong> → Peak rate<br />
-            All other slots → Off-peak rate
+            All other slots → Off-peak rate<br />
+            <span className="text-violet-600 font-medium">Holiday dates follow this same logic.</span>
           </p>
         </div>
+      </div>
+
+      {/* ── Holiday dates ───────────────────────────── */}
+      <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-5 mt-5">
+        <div className="flex items-center gap-2 mb-1">
+          <span>🎉</span>
+          <h2 className="font-bold text-gray-800">Holiday &amp; Special Dates</h2>
+        </div>
+        <p className="text-sm text-gray-400 mb-5">
+          These dates use <strong className="text-gray-600">weekend pricing</strong> regardless
+          of which day they fall on — useful for public holidays, long-weekend bridges, etc.
+        </p>
+
+        {/* Add form */}
+        <div className="flex flex-wrap items-end gap-3 mb-5">
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">Date</label>
+            <input
+              type="date"
+              value={newHoliday.date}
+              onChange={(e) => setNewHoliday((p) => ({ ...p, date: e.target.value }))}
+              className="border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
+            />
+          </div>
+          <div className="flex-1 min-w-[180px]">
+            <label className="block text-xs text-gray-500 mb-1">Label <span className="text-gray-400">(optional)</span></label>
+            <input
+              type="text"
+              placeholder="e.g. Idul Fitri, Christmas"
+              value={newHoliday.label}
+              onChange={(e) => setNewHoliday((p) => ({ ...p, label: e.target.value }))}
+              className="w-full border border-gray-200 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-blue"
+            />
+          </div>
+          <button
+            onClick={() => {
+              if (!newHoliday.date) { setHolidayError('Please pick a date.'); return }
+              addHoliday.mutate()
+            }}
+            disabled={addHoliday.isPending}
+            className="bg-brand-blue text-white px-5 py-2 rounded-xl text-sm font-bold hover:bg-[#0a2540] disabled:opacity-50 transition-colors whitespace-nowrap"
+          >
+            {addHoliday.isPending ? 'Adding…' : '+ Add Date'}
+          </button>
+          {holidayError && (
+            <p className="w-full text-xs text-red-500 -mt-1">{holidayError}</p>
+          )}
+        </div>
+
+        {/* Holiday list */}
+        {holidays.length === 0 ? (
+          <div className="text-center py-8 border border-dashed border-gray-200 rounded-xl">
+            <p className="text-sm text-gray-400">No holiday dates configured yet.</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {holidays.map((h) => {
+              const d = parseISO(h.date)
+              return (
+                <div
+                  key={h.id}
+                  className="flex items-center justify-between bg-violet-50 border border-violet-100 rounded-xl px-4 py-3"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="text-center bg-white rounded-lg border border-violet-200 px-3 py-1.5 min-w-[56px]">
+                      <p className="text-[10px] font-bold text-violet-400 uppercase">{format(d, 'MMM')}</p>
+                      <p className="text-lg font-black text-violet-700 leading-tight">{format(d, 'd')}</p>
+                      <p className="text-[10px] text-violet-400">{format(d, 'yyyy')}</p>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-gray-800">{h.label ?? <span className="text-gray-400 italic">No label</span>}</p>
+                      <p className="text-xs text-gray-400">{format(d, 'EEEE')} · Weekend pricing</p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => removeHoliday.mutate(h.id)}
+                    disabled={removeHoliday.isPending}
+                    className="text-xs text-red-400 hover:text-red-600 font-medium px-2 py-1 rounded-lg hover:bg-red-50 transition-colors"
+                  >
+                    Remove
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
     </div>
